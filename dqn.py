@@ -58,7 +58,6 @@ class DQNAgent(object):
         return
 
 def phi(images,
-        history_size=4,
         resize_to=(110, 84),
         crop_to=(84, 84),
         method=tf.image.ResizeMethod.BILINEAR):
@@ -76,9 +75,11 @@ def phi(images,
 
     with tf.name_scope('phi', values=images) as scope:
         # [b_size, 4, 210, 160, 3] -> [b_size, 210, 160, 4]
-        perm_grayscale = tf.stack([tf.squeeze(i.rgb_to_grayscale(img, name='rgb2grayscale'))
-                                   for img in tf.unstack(images, axis=1)],
-                                  axis=-1)
+        perm_grayscale = tf.transpose(tf.squeeze(
+            i.rgb_to_grayscale(images,
+                               name='rgb2grayscale'),
+            axis=-1),
+                                      perm=[0, 2, 3, 1])
 
         # [b_size, 210, 160, 4] -> [b_size, 110, 84, 4]
         downsample = i.resize_images(images=perm_grayscale,
