@@ -162,13 +162,13 @@ deepmind_arch = (Conv2DSpec(name='conv1',
                         activation=tf.nn.relu))
 
 dnn_arch = (FCSpec(name='fc1',
-                   units=32,
+                   units=256,
                    activation=tf.nn.relu),
             FCSpec(name='fc2',
-                   units=32,
+                   units=256,
                    activation=tf.nn.relu),
             FCSpec(name='fc3',
-                   units=32,
+                   units=256,
                    activation=tf.nn.relu))
 
 
@@ -324,7 +324,7 @@ class DQNAgent(object):
         obs_tn, r_t, dones, info = samples
         #return np.stack(obs_tn, axis=0), r_t = np.st
 
-    def eval(self, episode, sess, act_phs, action_op, num_eval_episodes=100):
+    def eval(self, episode, sess, act_phs, action_op, num_eval_episodes=10):
         # 1) Get Action for current observation
         cum_rewards = []
 
@@ -349,8 +349,8 @@ class DQNAgent(object):
     def learn(self,
               log_dir,
               n_episodes=10000,
-              start_training=10,
-              batch_size=32,
+              start_training=1000,
+              batch_size=128,
               update_qtn_every=1000,
               init_eps=1.0,
               log_every=100):
@@ -407,7 +407,7 @@ class DQNAgent(object):
                                                            feed_dict=self._make_feed(transition_phs,
                                                                                      self._buffer.sample(batch_size)))
                         eps_loss[i] += loss_t
-                        writer.add_summary(summaries, global_t)
+
 
                     if i % update_qtn_every == 0:
                         _ = session.run(fetches=[train_qn_op, update_qtn_op],
@@ -418,11 +418,11 @@ class DQNAgent(object):
                     eps_reward[i] += r_t
                     eps_length[i] += 1
                     global_t += 1
-
                     #self.env.render()
                 if i > 0 and i % log_every == 0:
                     print('episode: {}, epsilon: {}'.format(i, episode_eps))
                     reward_analysis(eps_reward, eps_length, eps_loss, n=log_every)
+                    writer.add_summary(summaries, global_t)
 
 
 
@@ -457,8 +457,8 @@ if __name__ == '__main__':
     tf.set_random_seed(42)
 
 
-    agent = get_agent(gym.make('CartPole-v0'),
+    agent = get_agent(gym.make('LunarLander-v2'),
                       arch='dnn',
                       n_episodes=10000,
-                      replay_capacity=int(1e5))
+                      replay_capacity=int(1e7))
     agent.learn(log_dir='../summaries', init_eps=1.0, log_every=100)
