@@ -115,6 +115,14 @@ def fc(inputs, name, units, activation=None, reuse=False):
 def flatten(inputs, name, reuse=False):
     return tf.layers.flatten(inputs, name=name)
 
+def mlp(inputs, name, n_units_per_layer, activations, reuse=False):
+    if len([inputs.get_shape().as_list()]) > 3:
+        inputs = flatten(inputs, name='input_flatten')
+    x = fc(inputs, name+'_fc0', n_units_per_layer[0], activations[0], reuse=reuse)
+    for i in range(1, len(n_units_per_layer)):
+        x = fc(x, name+'_fc{}'.format(i), n_units_per_layer[i], activations[i], reuse=reuse)
+    return x
+
 # To use these with the functions in this lib,
 # add the input tensor and a reuse flag
 # in the construction context
@@ -184,7 +192,8 @@ class DQNAgent(object):
                  arch='dnn'):
         if not arch in archs:
             raise TypeError('{} not in registered architectures'.format(arch))
-        self.env = env
+        self.env_name = env
+        self.env = gym.make(env)
         self.n_episodes = n_episodes
         self.replay_capacity = int(replay_capacity)
         self.arch = archs[arch]
@@ -201,13 +210,15 @@ class DQNAgent(object):
                    activation=None)
         return make_layer(inp, s, reuse=reuse)
 
-    def _theta(self, inputs, name, reuse=False):
+    def _theta(self, inputs, name, dueling=True, reuse=False):
         x = inputs
         with tf.variable_scope(name):
             for spec in self.arch:
                 x = make_layer(x, spec, reuse)
-            output = self._output_layer(x, reuse=reuse)
-        return output
+            if not dueling:
+                return self._output_layer(x, reuse=reuse)
+            else:
+                return self._dueling_networks(x, reuse=reuse)
 
     def _transition_phs(self):
         return Transition(
@@ -231,8 +242,11 @@ class DQNAgent(object):
         feeds = {}
         for ph, val in zip(phs, vals):
             if isinstance(ph, ObservationInput):
-                feeds.update(ph.make_feed_dict(val))
+                #print(ph.name, val.shape, val.dtype)
+                feeds.update(ph.make_feed_dict(val.astype(np.float32)))
             else:
+                #if not isinstance(val, (bool, float)):
+                #    print(ph.name, val.shape, val.dtype)
                 feeds[ph] = val
         return feeds
 
@@ -257,6 +271,23 @@ class DQNAgent(object):
 
         return phs, eps_greedy_actions, update_eps_op
 
+    def _dueling_networks(self, feature_maps, combinator='mean', reuse=False):
+        v_stream_units = [512, 1]
+        a_stream_units = [512, self.num_actions]
+        stream_activations = [tf.nn.relu, None]
+
+        v_stream = mlp(feature_maps, 'v_stream', v_stream_units, stream_activations, reuse=reuse)
+        a_stream = mlp(feature_maps, 'a_stream', a_stream_units, stream_activations, reuse=reuse)
+        if combinator == 'max':
+            q_fn = v_stream + (a_stream - tf.reduce_max(a_stream, axis=-1, keepdims=True))
+        elif combinator == 'mean':
+            q_fn = v_stream + (a_stream - tf.reduce_mean(a_stream, axis=-1, keepdims=True))
+        else:
+            raise NotImplementedError
+        #variable_summaries('Q_s_a_theta_alpha_beta', q_fn)
+        #variable_summaries('v_stream', v_stream)
+        #variable_summaries('a_stream', a_stream)
+        return q_fn
 
     def _train_and_update_ops(self, loss, theta_t, theta_tn, grad_norm_clip=10):
         opt = tf.train.RMSPropOptimizer(learning_rate=0.001)
@@ -288,6 +319,7 @@ class DQNAgent(object):
         # Add action value function for transition initial state (reusing self._act weights)
         q_t = self._theta(phi_t.get(), 'theta_t', reuse=True)
         variable_summaries('qvalues_obs_t', q_t)
+        avg_action_gap(q_t, 'q_t')
         q_t_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='theta_t')
 
         # Add action value function for transition terminal state
@@ -295,13 +327,14 @@ class DQNAgent(object):
         q_tn = self._theta(phi_tn.get(), 'theta_tn')
         variable_summaries('qvalues_obs_t_next', q_tn)
         q_tn_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='theta_tn')
+        avg_action_gap(q_tn, 'q_tn')
 
         # Action-Value for action performed at timestep t in each transition
-        q_value_action_at_t = tf.reduce_sum(q_t * tf.one_hot(a_t, self.num_actions), 1)
+        q_value_action_at_t = tf.reduce_sum(q_t * tf.one_hot(a_t, self.num_actions), -1)
         variable_summaries('qvalue_action_taken_at_t', q_value_action_at_t)
 
         # Next-Timestep-Best-Action Action-Value i.e RHS of Bellman's Equation
-        q_tn_best = tf.reduce_max(q_tn, 1)
+        q_tn_best = tf.reduce_max(q_tn, axis=-1)
         variable_summaries('qvalue_best_next_action', q_tn_best)
         q_tn_best_masked = (1.0 - done) * q_tn_best
         variable_summaries('qvalue_best_next_action_termination_adjusted', q_tn_best_masked)
@@ -349,15 +382,13 @@ class DQNAgent(object):
     def learn(self,
               log_dir,
               n_episodes=10000,
-              start_training=1000,
+              start_training=100,
               batch_size=128,
               update_qtn_every=1000,
               init_eps=1.0,
               log_every=100):
 
         self._init_replay_memory()
-
-        self.env.reset()
 
         # initialize eps decay generator
         eps_val = linear_decay(init=init_eps, final=0.02, n_steps=250)
@@ -368,8 +399,9 @@ class DQNAgent(object):
             act_phs, eps_greedy_actions, eps_update_op, transition_phs, loss_op, train_qn_op, update_qtn_op = self._build_deepQ_graph()
             # Collect summary ops and write to file
             merged = tf.summary.merge_all()
-            writer = tf.summary.FileWriter(log_dir + '/'+self.__class__.__name__,
-                                           session.graph)
+            writer = tf.summary.FileWriter(
+                '/'.join([log_dir, '_'.join([self.__class__.__name__, self.env_name])]),
+                session.graph)
 
             # Initialize tf variables
             # set qtn weights to be equal to qt weights
@@ -381,7 +413,6 @@ class DQNAgent(object):
             eps_loss = []
             global_t = 0
             for i in range(n_episodes):
-                self.env.reset()
                 episode_eps = next(eps_val)
                 done = False
                 stochastic = True
@@ -391,11 +422,14 @@ class DQNAgent(object):
                 eps_loss.append(0.0)
                 while not done:
                     # 1) Get Action for current observation
-                    a_t, _ = session.run(fetches=[eps_greedy_actions, eps_update_op],
-                                      feed_dict=self._make_feed(act_phs, ActFeed(phi_t=np.array(obs_t)[None],
-                                                                                 stochastic=stochastic,
-                                                                                 update_eps=episode_eps)))
-
+                    try:
+                        a_t, _ = session.run(fetches=[eps_greedy_actions, eps_update_op],
+                                             feed_dict=self._make_feed(act_phs, ActFeed(phi_t=np.array(obs_t)[None],
+                                                                                        stochastic=stochastic,
+                                                                                        update_eps=episode_eps)))
+                    except:
+                        print('Eta-Policy')
+                        import pdb; pdb.pm()
                     # From Array to Scalar
                     a_t = a_t[0] if hasattr(self.env.action_space, 'n') else a_t
                     obs_tn, r_t, done, info = self.env.step(a_t)
@@ -409,7 +443,7 @@ class DQNAgent(object):
                         eps_loss[i] += loss_t
 
 
-                    if i % update_qtn_every == 0:
+                    if global_t % update_qtn_every == 0:
                         _ = session.run(fetches=[train_qn_op, update_qtn_op],
                                         feed_dict=self._make_feed(transition_phs,
                                                                   self._buffer.sample(batch_size)))
@@ -426,6 +460,7 @@ class DQNAgent(object):
 
 
 
+
 def linear_decay(init, final, n_steps):
     delta = (init - final) / n_steps
     assert init > final, 'init: {} must be greater than final: {}'.format(init, final)
@@ -439,6 +474,13 @@ def linear_decay(init, final, n_steps):
 def get_agent(env, **kwargs):
     return DQNAgent(env=env or gym.make('CartPole-v0'),
                     **kwargs)
+
+def avg_action_gap(q_vals, name):
+    v, _ = tf.nn.top_k(q_vals, k=2, name='highest_rewards')
+    batch_action_gap = v[:, 0] - v[:, 1]
+    action_gap = tf.reduce_mean(batch_action_gap, name='action_gap')
+    tf.summary.scalar(name+'_action_gap', action_gap)
+
 
 def reward_analysis(rewards, eps_len, eps_loss, n=100):
     min_c_reward = np.min(rewards[-n:])
@@ -457,8 +499,8 @@ if __name__ == '__main__':
     tf.set_random_seed(42)
 
 
-    agent = get_agent(gym.make('LunarLander-v2'),
+    agent = get_agent(env='Pong-ram-v0',
                       arch='dnn',
                       n_episodes=10000,
-                      replay_capacity=int(1e7))
-    agent.learn(log_dir='../summaries', init_eps=1.0, log_every=100)
+                      replay_capacity=int(1e6))
+    agent.learn(log_dir='./summaries', init_eps=1.0, log_every=20)
