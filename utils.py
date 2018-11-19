@@ -189,10 +189,10 @@ def variable_summaries(name, var):
     name = name.replace(':', '_')
     with tf.name_scope(name):
         mean = tf.reduce_mean(var)
-        tf.summary.scalar(name+'_mean', mean)
-        with tf.name_scope(name+'_stddev'):
+        tf.summary.scalar('mean', mean)
+        with tf.name_scope('stddev'):
             stddev = tf.sqrt(tf.reduce_mean(tf.square(var - mean)))
-        tf.summary.scalar(name+'_stddev', stddev)
-        tf.summary.scalar(name+'_max', tf.reduce_max(var))
-        tf.summary.scalar(name+'_min', tf.reduce_min(var))
-        tf.summary.histogram(name+'_histogram', var)
+        tf.summary.scalar('stddev', stddev)
+        tf.summary.scalar('max', tf.reduce_max(var))
+        tf.summary.scalar('min', tf.reduce_min(var))
+        tf.summary.histogram('histogram', var)
